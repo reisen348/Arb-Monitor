@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perp-arb"
+version = "0.1.0"
+description = "Multi-perp arbitrage scoring engine for perp DEX and CEX venues."
+requires-python = ">=3.9"
+dependencies = [
+    "websockets>=10",
+]
+
+[project.scripts]
+perp-arb = "perp_arb.cli:main"
+
+[tool.setuptools]
+packages = ["perp_arb"]

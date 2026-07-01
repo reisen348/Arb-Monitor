@@ -1,0 +1,32 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime state and local data
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+*.pid
+
+# Local/editor/system files
+.DS_Store
+.idea/
+.vscode/
+
+# Internal handoff files and generated backups
+CLAUDE_CODEX.md
+HANDOFF.md
+*.bak
+*.bak.*
+*.corrupt.*
+*.png
+截屏*.png

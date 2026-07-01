@@ -1,0 +1,17 @@
+[Unit]
+Description=Perp Arb Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__ARB_MONITOR_ROOT__
+EnvironmentFile=-__ARB_MONITOR_ROOT__/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m perp_arb dashboard --source all_live --transport rest --top 10000 --min-label blocked --refresh 10 --interval 10 --host 0.0.0.0 --port 8765 --top-book-markets 2 --lighter-book-request-workers 1 --db-path arb_state.db
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
