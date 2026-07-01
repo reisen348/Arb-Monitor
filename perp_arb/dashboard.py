@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import traceback
@@ -27,6 +28,17 @@ TG_ALERT_SECONDS = 60.0
 TG_ALERT_MIN_SPREAD_VS_MEAN_PCT = 0.5
 TG_ALERT_MIN_SPREAD_ZSCORE = 1.25
 TG_ALERT_MIN_LEG_OI_USD = 1_000_000.0
+_BLACKLIST_QUOTE_SUFFIX_RE = re.compile(r"[-_](USD|USDT|USDC|USDE|FDUSD|USDT0)(\.P)?$")
+
+
+def _normalize_blacklist_asset(value) -> str:
+    asset = str(value or "").strip().upper()
+    if not asset:
+        return ""
+    asset = re.split(r"[/\s]+", asset, maxsplit=1)[0]
+    asset = _BLACKLIST_QUOTE_SUFFIX_RE.sub("", asset)
+    asset = re.sub(r"-PERP$", "", asset)
+    return asset
 
 
 def _has_lighter_ticker_only_leg(opportunity) -> bool:
@@ -98,7 +110,8 @@ def serve_dashboard(args, out: Optional[TextIO] = None) -> int:
         logger.info("Telegram 通知已启用 (chat_id=%s)", tg_chat_id)
     app = _DashboardApp(scanner=scanner, refresh_seconds=args.refresh,
                         scan_interval=args.interval,
-                        tg_token=tg_token, tg_chat_id=tg_chat_id)
+                        tg_token=tg_token, tg_chat_id=tg_chat_id,
+                        asset_blacklist_path=args.asset_blacklist_path)
     server = ThreadingHTTPServer((args.host, args.port), app.handler())
     destination = f"http://{args.host}:{args.port}"
     logger.info("面板启动: %s (刷新=%ss, 轮询=%ss, top=%d, 价差Z窗口=%d点≈4h, 归档保留=%.1fh)",
@@ -150,12 +163,17 @@ class _TelegramNotifier:
 class _DashboardApp:
     def __init__(self, scanner: RealtimeScanner, refresh_seconds: float,
                  scan_interval: float = 5.0,
-                 tg_token: str = "", tg_chat_id: str = "") -> None:
+                 tg_token: str = "", tg_chat_id: str = "",
+                 asset_blacklist_path: str = "") -> None:
         self.scanner = scanner
         self.refresh_seconds = refresh_seconds
         self._scan_count = 0
         self._cached_payload: Optional[dict] = None
         self._lock = threading.Lock()
+        self._asset_blacklist_path = asset_blacklist_path
+        self._asset_blacklist_lock = threading.Lock()
+        self._asset_blacklist: set[str] = set()
+        self._load_asset_blacklist()
         # Per-adapter snapshot cache: adapter_name -> (snapshots, source_status)
         self._adapter_cache: Dict[str, tuple] = {}
         # Track when each (asset, venue_a, venue_b) key first met the TG alert condition.
@@ -180,6 +198,90 @@ class _DashboardApp:
         if self.scanner.adapters:
             self._bg_thread = threading.Thread(target=self._background_scan_loop, daemon=True)
             self._bg_thread.start()
+
+    def _load_asset_blacklist(self) -> None:
+        if not self._asset_blacklist_path:
+            return
+        try:
+            with open(self._asset_blacklist_path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except FileNotFoundError:
+            raw = []
+        except Exception:
+            logger.warning("读取币种黑名单失败: %s", self._asset_blacklist_path, exc_info=True)
+            raw = []
+        if isinstance(raw, dict):
+            raw = raw.get("assets", [])
+        assets = {_normalize_blacklist_asset(asset) for asset in raw}
+        with self._asset_blacklist_lock:
+            self._asset_blacklist = {asset for asset in assets if asset}
+
+    def _save_asset_blacklist_locked(self) -> None:
+        if not self._asset_blacklist_path:
+            return
+        directory = os.path.dirname(os.path.abspath(self._asset_blacklist_path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp_path = f"{self._asset_blacklist_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump({"assets": sorted(self._asset_blacklist)}, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.replace(tmp_path, self._asset_blacklist_path)
+
+    def asset_blacklist(self) -> list[str]:
+        with self._asset_blacklist_lock:
+            return sorted(self._asset_blacklist)
+
+    def set_asset_blacklist(self, assets) -> list[str]:
+        normalized = {_normalize_blacklist_asset(asset) for asset in assets}
+        with self._asset_blacklist_lock:
+            self._asset_blacklist = {asset for asset in normalized if asset}
+            self._save_asset_blacklist_locked()
+            return sorted(self._asset_blacklist)
+
+    def _is_asset_blacklisted(self, asset) -> bool:
+        normalized = _normalize_blacklist_asset(asset)
+        if not normalized:
+            return False
+        with self._asset_blacklist_lock:
+            return normalized in self._asset_blacklist
+
+    def _asset_keys_for_opportunity(self, opportunity) -> set[str]:
+        keys = {
+            _normalize_blacklist_asset(getattr(opportunity, "asset", "")),
+            _normalize_blacklist_asset(getattr(getattr(opportunity, "leg_a", None), "asset", "")),
+            _normalize_blacklist_asset(getattr(getattr(opportunity, "leg_b", None), "asset", "")),
+        }
+        return {key for key in keys if key}
+
+    def _is_opportunity_blacklisted(self, opportunity) -> bool:
+        keys = self._asset_keys_for_opportunity(opportunity)
+        if not keys:
+            return False
+        with self._asset_blacklist_lock:
+            return bool(keys & self._asset_blacklist)
+
+    def _payload_for_client(self) -> dict:
+        payload = dict(self._cached_payload or {})
+        blacklist = self.asset_blacklist()
+        payload["asset_blacklist"] = blacklist
+        if blacklist and "opportunities" in payload:
+            blocked = set(blacklist)
+            opportunities = [
+                item
+                for item in payload.get("opportunities", [])
+                if not (
+                    {
+                        _normalize_blacklist_asset(item.get("asset")),
+                        _normalize_blacklist_asset(item.get("venue_a_asset")),
+                        _normalize_blacklist_asset(item.get("venue_b_asset")),
+                    }
+                    & blocked
+                )
+            ]
+            payload["opportunities"] = opportunities
+            payload["opportunity_count"] = len(opportunities)
+        return payload
 
     def _rebuild_payload(self, scan_duration_ms: float = 0.0, timestamp=None) -> None:
         """Merge all adapter caches, score, and update the cached payload."""
@@ -425,6 +527,9 @@ class _DashboardApp:
             opp = scored.opportunity
             key = f"{opp.asset}|{opp.leg_a.venue}|{opp.leg_b.venue}"
 
+            if self._is_opportunity_blacklisted(opp):
+                continue
+
             # Skip structurally stable large spreads (won't revert)
             if key in self._structural_blacklist:
                 continue
@@ -560,6 +665,9 @@ class _DashboardApp:
 
         # Notify on completions
         for pos in completed:
+            if self._is_asset_blacklisted(pos.get("asset")):
+                logger.info("跳过已拉黑币种仓位完成通知: %s", pos.get("asset"))
+                continue
             self._completed_positions.append(pos)
             msg = (
                 f"✅ <b>套利完成</b>\n"
@@ -584,7 +692,7 @@ class _DashboardApp:
                     return
                 if parsed.path == "/api/dashboard":
                     if app._cached_payload is not None:
-                        self._respond_json(app._cached_payload)
+                        self._respond_json(app._payload_for_client())
                     else:
                         self._respond_json({"error": "scan pending", "snapshot_count": 0,
                                             "opportunity_count": 0, "opportunities": [],
@@ -594,7 +702,11 @@ class _DashboardApp:
                                                                    "top_tags": [], "top_opportunity": None,
                                                                    "market_regime": "idle"},
                                             "alert_sound": False, "alert_items": [],
-                                            "practice": app._practice_tracker.update([])})
+                                            "practice": app._practice_tracker.update([]),
+                                            "asset_blacklist": app.asset_blacklist()})
+                    return
+                if parsed.path == "/api/asset-blacklist":
+                    self._respond_json({"assets": app.asset_blacklist()})
                     return
                 if parsed.path == "/health":
                     self._respond_json({"ok": True})
@@ -621,6 +733,13 @@ class _DashboardApp:
                         self._respond_json({"ok": removed})
                     else:
                         self._respond_json({"ok": False, "error": "unknown action"})
+                    return
+                if parsed.path == "/api/asset-blacklist":
+                    assets = body.get("assets", [])
+                    if not isinstance(assets, list):
+                        self.send_error(400, "assets must be a list")
+                        return
+                    self._respond_json({"ok": True, "assets": app.set_asset_blacklist(assets)})
                     return
                 self.send_error(404, "Not found")
 
@@ -1360,6 +1479,13 @@ body{{min-height:100vh;overflow:hidden}}
 .status{{color:var(--muted)}}
 .search{{background:#030303;border:1px solid #1c1c24;color:var(--text);border-radius:3px;padding:3px 8px;font:inherit;font-size:13px;width:210px;outline:none}}
 .search:focus{{border-color:#444}}
+.blacklist-input{{width:118px}}
+.mini-btn{{background:#050508;border:1px solid #2b2b34;color:var(--text);border-radius:3px;padding:3px 8px;font:inherit;font-size:13px;cursor:pointer}}
+.mini-btn:hover{{border-color:#555;color:var(--white)}}
+.blacklist-tags{{display:flex;flex-wrap:wrap;gap:6px;grid-column:1/-1;color:var(--muted);font-size:12px}}
+.blacklist-tags:empty{{display:none}}
+.blacklist-tag{{background:#050508;border:1px solid #2b2b34;color:#d6d6dc;border-radius:3px;padding:2px 6px;font:inherit;font-size:12px;cursor:pointer}}
+.blacklist-tag:hover{{border-color:var(--red);color:var(--red)}}
 .table-wrap{{flex:1;min-height:0;overflow:auto;padding-top:12px}}
 table{{width:100%;border-collapse:collapse;table-layout:fixed}}
 thead th{{position:sticky;top:0;background:#000;color:#e5e5e8;font-weight:700;text-align:left;padding:4px 8px 7px;border-bottom:0;font-size:16px;white-space:nowrap}}
@@ -1412,10 +1538,13 @@ tbody tr:hover td{{background:#08080d;color:#d6d6dc}}
     </div>
     <div class="actions">
       <input id="search-input" class="search" placeholder="搜索币种/交易所" oninput="applyFilters()">
+      <input id="blacklist-input" class="search blacklist-input" placeholder="拉黑币种" onkeydown="if(event.key==='Enter')addBlacklistAsset()">
+      <button type="button" class="mini-btn" onclick="addBlacklistAsset()">拉黑</button>
       <span class="status" id="status-text">启动中...</span>
       <span class="status" id="clock">--:--:--</span>
     </div>
     <div class="checks" id="venue-checks"></div>
+    <div class="blacklist-tags" id="blacklist-tags"></div>
   </div>
   <div class="table-wrap">
     <table>
@@ -1447,7 +1576,9 @@ const ACTIVE_HINTS=new Set(ALL_VENUES);
 const DEFAULT_VISIBLE_ROWS=20;
 const DISPLAY_MIN_OI_USD=25000;
 const DISPLAY_MIN_VOLUME_USD=50000;
+const BLACKLIST_STORAGE_KEY="perpArb.assetBlacklist.v1";
 let selectedVenues=new Set();
+let blacklistedAssets=new Set();
 let lastRows=[];
 let activeSort="annual";
 let sortAnnualDir=-1;
@@ -1456,6 +1587,75 @@ let sortSpreadMeanDir=-1;
 
 function esc(v){{return String(v??"").replace(/[&<>"]/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}})[c])}}
 function normVenue(v){{const s=String(v||"").replace(/-ws$/,"").toLowerCase();return s.charAt(0).toUpperCase()+s.slice(1)}}
+function normAsset(v){{
+  let s=String(v||"").trim().toUpperCase();
+  if(!s)return "";
+  s=s.split(/[\\/\\s]+/)[0];
+  s=s.replace(/[-_](USD|USDT|USDC|USDE|FDUSD|USDT0)(\\.P)?$/,"");
+  s=s.replace(/-PERP$/,"");
+  return s;
+}}
+function assetKeys(item){{return [item.asset,item.venue_a_asset,item.venue_b_asset].map(normAsset).filter(Boolean)}}
+function isBlacklistedAsset(item){{return assetKeys(item).some(asset=>blacklistedAssets.has(asset))}}
+function localBlacklist(){{
+  try{{
+    const raw=JSON.parse(localStorage.getItem(BLACKLIST_STORAGE_KEY)||"[]");
+    return new Set((Array.isArray(raw)?raw:[]).map(normAsset).filter(Boolean));
+  }}catch(_){{return new Set()}}
+}}
+function persistLocalBlacklist(){{localStorage.setItem(BLACKLIST_STORAGE_KEY,JSON.stringify([...blacklistedAssets].sort()))}}
+async function syncBlacklist(){{
+  persistLocalBlacklist();
+  try{{
+    const resp=await fetch("/api/asset-blacklist",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{assets:[...blacklistedAssets]}})}});
+    if(resp.ok){{
+      const d=await resp.json();
+      blacklistedAssets=new Set((d.assets||[]).map(normAsset).filter(Boolean));
+      persistLocalBlacklist();
+      renderBlacklistTags();
+      applyFilters();
+    }}
+  }}catch(err){{console.warn("asset blacklist sync failed",err)}}
+}}
+async function loadBlacklist(){{
+  blacklistedAssets=localBlacklist();
+  try{{
+    const resp=await fetch("/api/asset-blacklist",{{cache:"no-store"}});
+    if(resp.ok){{
+      const d=await resp.json();
+      const serverAssets=new Set((d.assets||[]).map(normAsset).filter(Boolean));
+      const merged=new Set([...serverAssets,...blacklistedAssets]);
+      blacklistedAssets=merged;
+      persistLocalBlacklist();
+      if(merged.size!==serverAssets.size)syncBlacklist();
+    }}
+  }}catch(err){{console.warn("asset blacklist load failed",err)}}
+  renderBlacklistTags();
+  applyFilters();
+}}
+function renderBlacklistTags(){{
+  const box=$("blacklist-tags");
+  if(!box)return;
+  box.innerHTML=[...blacklistedAssets].sort().map(asset=>`<button type="button" class="blacklist-tag" data-asset="${{esc(asset)}}" onclick="removeBlacklistAsset(this.dataset.asset)" title="取消拉黑 ${{esc(asset)}}">${{esc(asset)}} ×</button>`).join("");
+}}
+async function addBlacklistAsset(asset){{
+  const input=$("blacklist-input");
+  const value=normAsset(asset??(input?input.value:""));
+  if(!value)return;
+  blacklistedAssets.add(value);
+  if(input)input.value="";
+  persistLocalBlacklist();
+  renderBlacklistTags();
+  applyFilters();
+  await syncBlacklist();
+}}
+async function removeBlacklistAsset(asset){{
+  blacklistedAssets.delete(normAsset(asset));
+  persistLocalBlacklist();
+  renderBlacklistTags();
+  applyFilters();
+  await syncBlacklist();
+}}
 function fmtMoney(v){{v=Number(v)||0;if(v<=0)return"--";const a=Math.abs(v);if(a>=1e9)return"$"+(v/1e9).toFixed(1)+"B";if(a>=1e6)return"$"+(v/1e6).toFixed(1)+"M";if(a>=1e3)return"$"+(v/1e3).toFixed(1)+"K";return"$"+v.toFixed(0)}}
 function fmtSignedPct(v,d=1){{v=Number(v)||0;return (v>0?"+":"")+v.toFixed(d)+"%"}}
 function fmtSignedBps(v,d=4){{v=Number(v)||0;return (v>0?"+":"")+v.toFixed(d)+"%"}}
@@ -1568,12 +1768,15 @@ function renderVenueChecks(){{
 }}
 function toggleVenue(el){{if(el.checked)selectedVenues.add(el.value);else selectedVenues.delete(el.value);applyFilters()}}
 function initControls(){{
+  loadBlacklist();
   for(const v of ACTIVE_HINTS)selectedVenues.add(v);
   renderVenueChecks();
+  renderBlacklistTags();
   for(const id of ["oi-slider","vol-slider","interval-slider"])$(id).addEventListener("input",()=>{{updateSliderLabels();applyFilters()}});
   updateSliderLabels();
 }}
 function matches(item,m){{
+  if(isBlacklistedAsset(item))return false;
   const q=($("search-input").value||"").trim().toLowerCase();
   if(q){{
     const hay=[item.asset,item.quote,item.venue_a,item.venue_b,item.venue_a_asset,item.venue_b_asset].join(" ").toLowerCase();
@@ -1663,6 +1866,11 @@ async function refresh(){{
     const resp=await fetch("/api/dashboard",{{cache:"no-store"}});
     if(!resp.ok)throw new Error(`HTTP ${{resp.status}}`);
     const d=await resp.json();
+    if(Array.isArray(d.asset_blacklist)){{
+      blacklistedAssets=new Set(d.asset_blacklist.map(normAsset).filter(Boolean));
+      persistLocalBlacklist();
+      renderBlacklistTags();
+    }}
     lastRows=d.opportunities||[];
     renderTable(lastRows);
     const ms=d.scan_duration_ms!=null?Number(d.scan_duration_ms).toFixed(0):"?";

@@ -7,7 +7,13 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from perp_arb.dashboard import _DashboardApp, _opportunity_zscore_window_points, _spread_vs_mean_pct, build_dashboard_html
+from perp_arb.dashboard import (
+    _DashboardApp,
+    _normalize_blacklist_asset,
+    _opportunity_zscore_window_points,
+    _spread_vs_mean_pct,
+    build_dashboard_html,
+)
 from perp_arb.market_data import SourceStatus
 from perp_arb.models import OpportunityBucket, PerpArbOpportunity, PerpLegSnapshot
 from perp_arb.persistence import StateStore
@@ -111,6 +117,25 @@ class DashboardHtmlTest(unittest.TestCase):
         self.assertIn("const oiA=Number(item.oi_a_usd)||0,oiB=Number(item.oi_b_usd)||0;", html)
         self.assertIn("const minOi=Math.min(oiA,oiB);", html)
         self.assertIn("const minVol=Math.min(volA,volB);", html)
+        self.assertIn('id="blacklist-input"', html)
+        self.assertIn('placeholder="拉黑币种"', html)
+        self.assertIn('const BLACKLIST_STORAGE_KEY="perpArb.assetBlacklist.v1";', html)
+        self.assertIn("let blacklistedAssets=new Set();", html)
+        self.assertIn("function normAsset(v)", html)
+        self.assertIn("function assetKeys(item)", html)
+        self.assertIn("function isBlacklistedAsset(item)", html)
+        self.assertIn("return assetKeys(item).some(asset=>blacklistedAssets.has(asset))", html)
+        self.assertIn("localStorage.setItem(BLACKLIST_STORAGE_KEY", html)
+        self.assertIn('fetch("/api/asset-blacklist"', html)
+        self.assertIn('JSON.stringify({assets:[...blacklistedAssets]})', html)
+        self.assertIn("d.asset_blacklist", html)
+        self.assertIn("function removeBlacklistAsset(asset)", html)
+        self.assertIn('data-asset="${esc(asset)}"', html)
+        self.assertIn("if(isBlacklistedAsset(item))return false;", html)
+        self.assertLess(
+            html.index("if(isBlacklistedAsset(item))return false;"),
+            html.index('const q=($("search-input").value||"").trim().toLowerCase();'),
+        )
         self.assertIn("if(!q.split(/\\s+/).every(t=>hay.includes(t)))return false;\n    return true;", html)
         self.assertLess(
             html.index('const q=($("search-input").value||"").trim().toLowerCase();'),
@@ -148,12 +173,51 @@ class DashboardHtmlTest(unittest.TestCase):
 
         self.assertAlmostEqual(_spread_vs_mean_pct(opportunity), 0.55, places=2)
 
+    def test_blacklist_asset_normalization_is_exact(self) -> None:
+        self.assertEqual(_normalize_blacklist_asset("bb"), "BB")
+        self.assertEqual(_normalize_blacklist_asset("BB/USD"), "BB")
+        self.assertEqual(_normalize_blacklist_asset("BB-USDT"), "BB")
+        self.assertEqual(_normalize_blacklist_asset("BBB"), "BBB")
+
     def test_tg_alert_requires_spread_mean_delta_zscore_and_duration(self) -> None:
         app = _DashboardApp(scanner=_ScannerStub(), refresh_seconds=2.0)
         scored = _make_scored_opportunity(spread_zscore=1.25, spread_mean_bps=10.0)
 
         with patch("perp_arb.dashboard.time.monotonic", side_effect=[100.0, 159.0, 161.0]):
             self.assertEqual(app.check_tradable_alerts([scored]), [])
+            self.assertEqual(app.check_tradable_alerts([scored]), [])
+            self.assertEqual(app.check_tradable_alerts([scored]), [scored])
+
+    def test_tg_alert_skips_blacklisted_asset(self) -> None:
+        app = _DashboardApp(scanner=_ScannerStub(), refresh_seconds=2.0)
+        app.set_asset_blacklist(["ETH"])
+        scored = _make_scored_opportunity(spread_zscore=1.25, spread_mean_bps=10.0)
+
+        with patch("perp_arb.dashboard.time.monotonic", side_effect=[100.0, 161.0]):
+            self.assertEqual(app.check_tradable_alerts([scored]), [])
+            self.assertEqual(app.check_tradable_alerts([scored]), [])
+
+    def test_tg_alert_skips_blacklisted_leg_asset_alias(self) -> None:
+        app = _DashboardApp(scanner=_ScannerStub(), refresh_seconds=2.0)
+        app.set_asset_blacklist(["XAU"])
+        scored = _make_scored_opportunity(
+            asset="PAXG",
+            leg_a_asset="XAU",
+            leg_b_asset="PAXG",
+            spread_zscore=1.25,
+            spread_mean_bps=10.0,
+        )
+
+        with patch("perp_arb.dashboard.time.monotonic", side_effect=[100.0, 161.0]):
+            self.assertEqual(app.check_tradable_alerts([scored]), [])
+            self.assertEqual(app.check_tradable_alerts([scored]), [])
+
+    def test_tg_alert_blacklist_does_not_match_substrings(self) -> None:
+        app = _DashboardApp(scanner=_ScannerStub(), refresh_seconds=2.0)
+        app.set_asset_blacklist(["ET"])
+        scored = _make_scored_opportunity(spread_zscore=1.25, spread_mean_bps=10.0)
+
+        with patch("perp_arb.dashboard.time.monotonic", side_effect=[100.0, 161.0]):
             self.assertEqual(app.check_tradable_alerts([scored]), [])
             self.assertEqual(app.check_tradable_alerts([scored]), [scored])
 
@@ -289,6 +353,9 @@ def _make_leg(venue: str, bid: float, ask: float) -> PerpLegSnapshot:
 
 def _make_scored_opportunity(
     *,
+    asset: str = "ETH",
+    leg_a_asset: str = "ETH",
+    leg_b_asset: str = "ETH",
     spread_zscore: float = 1.25,
     spread_mean_bps: float = 10.0,
     label_value: str = "blocked",
@@ -301,10 +368,10 @@ def _make_scored_opportunity(
 ):
     leg_a = _make_leg("bybit", 100.0, 100.1)
     leg_b = _make_leg("lighter", 100.75, 100.85)
-    leg_a = PerpLegSnapshot(**{**leg_a.__dict__, "oi_usd": leg_a_oi_usd})
-    leg_b = PerpLegSnapshot(**{**leg_b.__dict__, "oi_usd": leg_b_oi_usd})
+    leg_a = PerpLegSnapshot(**{**leg_a.__dict__, "asset": leg_a_asset, "oi_usd": leg_a_oi_usd})
+    leg_b = PerpLegSnapshot(**{**leg_b.__dict__, "asset": leg_b_asset, "oi_usd": leg_b_oi_usd})
     opportunity = PerpArbOpportunity(
-        asset="ETH",
+        asset=asset,
         quote="USD",
         leg_a=leg_a,
         leg_b=leg_b,

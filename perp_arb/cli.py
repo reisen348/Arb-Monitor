@@ -196,6 +196,11 @@ def _add_dashboard_persistence_arguments(parser: argparse.ArgumentParser) -> Non
         default=24.0,
         help="Hours of opportunity archive history to keep in SQLite.",
     )
+    parser.add_argument(
+        "--asset-blacklist-path",
+        default="asset_blacklist.json",
+        help="JSON file used by the dashboard and Telegram alerts to hide blacklisted assets.",
+    )
     # Backward-compatible no-op options for existing service units and scripts
     # that still pass the removed dashboard history-panel settings.
     parser.add_argument("--max-points", type=int, default=3600, help=argparse.SUPPRESS)

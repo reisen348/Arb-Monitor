@@ -16,6 +16,7 @@ __pycache__/
 *.sqlite3
 *.log
 *.pid
+asset_blacklist.json
 
 # Local/editor/system files
 .DS_Store
