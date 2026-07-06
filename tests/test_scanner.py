@@ -111,6 +111,26 @@ class OpportunityBuilderTest(unittest.TestCase):
         venue_pairs = {frozenset((opp.leg_a.venue, opp.leg_b.venue)) for opp in opportunities}
         self.assertEqual(venue_pairs, {frozenset(("gate", "nado")), frozenset(("gate", "kraken")), frozenset(("nado", "kraken"))})
 
+    def test_builder_treats_dram_as_rwa_without_exchange_metadata(self) -> None:
+        builder = OpportunityBuilder()
+        snapshots = [
+            replace(make_snapshot("grvt", "DRAM", 65.5, 65.6, 0.0), metadata={}),
+            replace(make_snapshot("lighter", "DRAM", 65.4, 65.5, 0.0), metadata={}),
+            replace(make_snapshot("aster", "DRAM", 65.6, 65.7, 0.0), metadata={"stock_like": True}),
+        ]
+        opportunities = builder.build(snapshots)
+
+        venue_pairs = {frozenset((opp.leg_a.venue, opp.leg_b.venue)) for opp in opportunities}
+        self.assertEqual(
+            venue_pairs,
+            {
+                frozenset(("aster", "grvt")),
+                frozenset(("aster", "lighter")),
+                frozenset(("grvt", "lighter")),
+            },
+        )
+        self.assertTrue(all(opp.metadata["market_family"] == "stock" for opp in opportunities))
+
     def test_builder_pairs_stock_symbols_across_stock_like_venues(self) -> None:
         builder = OpportunityBuilder()
         snapshots = [

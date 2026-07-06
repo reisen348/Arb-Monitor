@@ -167,7 +167,7 @@ class FakeKrakenClient:
                             "ask": 68010.0,
                             "volumeQuote": 400000000.0,
                             "openInterest": 250.0,
-                            "fundingRate": 0.00001,
+                            "fundingRate": 0.68,
                             "indexPrice": 68005.0,
                             "open24h": 67000.0,
                             "suspended": False,
@@ -181,9 +181,23 @@ class FakeKrakenClient:
                             "ask": 288.4,
                             "volumeQuote": 30000.0,
                             "openInterest": 100.0,
-                            "fundingRate": 0.001,
+                            "fundingRate": 0.02881,
                             "indexPrice": 288.1,
                             "open24h": 290.0,
+                            "suspended": False,
+                        },
+                        {
+                            "symbol": "PF_XAUTUSD",
+                            "tag": "perpetual",
+                            "pair": "XAUT:USD",
+                            "markPrice": 4161.53560689251,
+                            "bid": 4161.5,
+                            "ask": 4161.9,
+                            "volumeQuote": 543596.0846,
+                            "openInterest": 648.326,
+                            "fundingRate": 0.08963465221566805,
+                            "indexPrice": 4160.7,
+                            "open24h": 4157.4,
                             "suspended": False,
                         },
                         {
@@ -304,18 +318,21 @@ class ExpandedCexAdapterTest(unittest.TestCase):
         self.assertEqual(by_symbol["EDGE_USDT"].asset, "GATE_EDGE")
         self.assertLessEqual(len([r for r in client.requests if "order_book" in r[0]]), 1)
 
-    def test_kraken_normalizes_xbt_and_stock_suffix(self) -> None:
+    def test_kraken_normalizes_xbt_stock_suffix_and_absolute_funding(self) -> None:
         client = FakeKrakenClient()
         adapter = KrakenAdapter(KrakenAdapterConfig(top_book_markets=1), client=client)
         snapshots = adapter.poll()
 
-        self.assertEqual({snap.asset for snap in snapshots}, {"BTC", "AAPL"})
+        self.assertEqual({snap.asset for snap in snapshots}, {"BTC", "AAPL", "XAUT"})
         self.assertEqual({snap.quote for snap in snapshots}, {"USD"})
         self.assertTrue(all(snap.metadata["funding_interval_hours"] == 1.0 for snap in snapshots))
         btc = next(snap for snap in snapshots if snap.asset == "BTC")
         aapl = next(snap for snap in snapshots if snap.asset == "AAPL")
-        self.assertAlmostEqual(btc.funding_rate_bps, 0.001)
-        self.assertAlmostEqual(aapl.funding_rate_bps, 0.1)
+        xaut = next(snap for snap in snapshots if snap.asset == "XAUT")
+        self.assertAlmostEqual(btc.funding_rate_bps, 0.68 / 68005.0 * 10_000.0)
+        self.assertAlmostEqual(aapl.funding_rate_bps, 0.02881 / 288.1 * 10_000.0)
+        self.assertAlmostEqual(xaut.funding_rate_bps, 0.08963465221566805 / 4160.7 * 10_000.0)
+        self.assertEqual(xaut.metadata["funding_rate_source"], "fundingRate/indexPrice")
         self.assertLessEqual(len([r for r in client.requests if "orderbook" in r[0]]), 1)
 
     def test_aster_discovers_stock_symbols_and_uses_volume_oi_fallback(self) -> None:

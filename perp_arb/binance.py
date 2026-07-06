@@ -2,7 +2,9 @@
 
 Public endpoints (no auth required):
   GET /fapi/v1/premiumIndex       → mark price, index price, funding rate (batch)
-  GET /fapi/v1/ticker/24hr        → best bid/ask, volume, OI (batch)
+  GET /fapi/v1/ticker/24hr        → 24h volume and price change stats (batch)
+  GET /fapi/v1/ticker/bookTicker  → best bid/ask (batch)
+  GET /fapi/v1/openInterest?symbol=X → current open interest for one symbol
   GET /fapi/v1/depth?symbol=X&limit=20 → orderbook for one symbol
 """
 from __future__ import annotations
@@ -24,6 +26,7 @@ class BinanceAdapterConfig:
     assets: Optional[Sequence[str]] = None
     timeout_seconds: float = 5.0
     top_book_markets: int = 10  # Only fetch depth for top N markets by volume
+    oi_markets: int = 100  # Fetch official OI for top N markets independently of depth
 
 
 class BinanceApiError(RuntimeError):
@@ -79,34 +82,46 @@ class BinanceAdapter(MarketDataAdapter):
         premium_resp, premium_latency = self.client.get("fapi/v1/premiumIndex")
         premium_map = self._parse_premium_index(premium_resp)
 
-        # 2. Batch: best bid/ask, volume for ALL symbols
+        # 2. Batch: 24h volume/change stats and top-of-book for ALL symbols.
         ticker_resp, ticker_latency = self.client.get("fapi/v1/ticker/24hr")
         ticker_map = self._parse_tickers(ticker_resp)
+        book_ticker_resp, book_ticker_latency = self.client.get("fapi/v1/ticker/bookTicker")
+        book_ticker_map = self._parse_book_tickers(book_ticker_resp)
 
-        batch_latency = max(premium_latency, ticker_latency)
+        batch_latency = max(premium_latency, ticker_latency, book_ticker_latency)
 
         # Filter to only USDT perpetual symbols present in both responses
         symbols = self._select_symbols(premium_map, ticker_map)
 
-        # 3. Rank by volume, only fetch depth for top N
+        # 3. Rank by official 24h quote volume, then fetch depth and OI for
+        # detailed markets. Binance does not expose current OI in the 24h
+        # ticker batch, so OI is fetched through the official per-symbol
+        # openInterest endpoint for the detailed set.
         top_symbols = self._rank_top_markets(symbols, ticker_map)
+        oi_symbols = symbols if self.config.assets else sorted(
+            top_symbols | self._rank_oi_markets(symbols, ticker_map)
+        )
+        open_interest_map, oi_latency = self._fetch_open_interest(oi_symbols)
 
         snapshots: List[MarketSnapshot] = []
         for symbol in symbols:
             premium = premium_map[symbol]
             ticker = ticker_map.get(symbol, {})
+            book_ticker = book_ticker_map.get(symbol, {})
+            open_interest = open_interest_map.get(symbol)
             try:
                 if symbol in top_symbols:
                     book_resp, book_latency = self.client.get(
                         f"fapi/v1/depth?symbol={symbol}&limit=20"
                     )
                     snapshot = self._build_snapshot(
-                        symbol, premium, ticker, book_resp,
-                        max(batch_latency, book_latency),
+                        symbol, premium, ticker, book_ticker, open_interest, book_resp,
+                        max(batch_latency, book_latency, oi_latency),
                     )
                 else:
                     snapshot = self._build_snapshot_from_ticker(
-                        symbol, premium, ticker, batch_latency,
+                        symbol, premium, ticker, book_ticker, open_interest,
+                        max(batch_latency, oi_latency if open_interest is not None else 0.0),
                     )
                 snapshots.append(snapshot)
             except Exception:
@@ -114,19 +129,26 @@ class BinanceAdapter(MarketDataAdapter):
         return snapshots
 
     def _rank_top_markets(self, symbols: List[str], ticker_map: Dict[str, dict]) -> set:
-        """Return top N by volume ∪ top N by OI (deduplicated)."""
+        """Return top N markets by official 24h quote volume."""
         n = self.config.top_book_markets
         vol_list = sorted(
             symbols,
             key=lambda s: _coerce_float(ticker_map.get(s, {}).get("quoteVolume")) or 0.0,
             reverse=True,
         )
-        oi_list = sorted(
+        return set(vol_list[:n])
+
+    def _rank_oi_markets(self, symbols: List[str], ticker_map: Dict[str, dict]) -> set:
+        """Return symbols that should receive per-symbol official OI requests."""
+        n = max(0, self.config.oi_markets)
+        if n <= 0:
+            return set()
+        vol_list = sorted(
             symbols,
-            key=lambda s: _coerce_float(ticker_map.get(s, {}).get("openInterest")) or 0.0,
+            key=lambda s: _coerce_float(ticker_map.get(s, {}).get("quoteVolume")) or 0.0,
             reverse=True,
         )
-        return set(vol_list[:n]) | set(oi_list[:n])
+        return set(vol_list[:n])
 
     def _select_symbols(self, premium_map: Dict[str, dict], ticker_map: Dict[str, dict]) -> List[str]:
         """Select USDT perpetual symbols, optionally filtered by config.assets."""
@@ -174,11 +196,47 @@ class BinanceAdapter(MarketDataAdapter):
                 parsed[symbol] = item
         return parsed
 
+    @staticmethod
+    def _parse_book_tickers(response: object) -> Dict[str, dict]:
+        """Parse ticker/bookTicker batch response into {symbol: info}."""
+        if not isinstance(response, list):
+            raise BinanceApiError("Unexpected ticker/bookTicker response shape")
+        parsed: Dict[str, dict] = {}
+        for item in response:
+            if not isinstance(item, dict):
+                continue
+            symbol = item.get("symbol", "")
+            if symbol:
+                parsed[symbol] = item
+        return parsed
+
+    def _fetch_open_interest(self, symbols: Sequence[str]) -> Tuple[Dict[str, float], float]:
+        parsed: Dict[str, float] = {}
+        max_latency = 0.0
+        for symbol in symbols:
+            try:
+                response, latency = self.client.get(f"fapi/v1/openInterest?symbol={symbol}")
+            except Exception:
+                continue
+            max_latency = max(max_latency, latency)
+            value = self._parse_open_interest(response)
+            if value is not None:
+                parsed[symbol] = value
+        return parsed, max_latency
+
+    @staticmethod
+    def _parse_open_interest(response: object) -> Optional[float]:
+        if not isinstance(response, dict):
+            return None
+        return _coerce_float(response.get("openInterest"))
+
     def _build_snapshot(
         self,
         symbol: str,
         premium: dict,
         ticker: dict,
+        book_ticker: dict,
+        open_interest: Optional[float],
         book_resp: object,
         latency_ms: float,
     ) -> MarketSnapshot:
@@ -208,11 +266,11 @@ class BinanceAdapter(MarketDataAdapter):
 
         # Volume & OI from ticker
         volume_24h = _coerce_float(ticker.get("quoteVolume")) or 0.0
-        oi_contracts = _coerce_float(ticker.get("openInterest")) or 0.0  # base amount
+        oi_contracts = open_interest or 0.0  # base amount from official openInterest endpoint
         oi_usd = oi_contracts * mark_price
 
         # Price change for realized vol
-        prev_close = _coerce_float(ticker.get("prevClosePrice")) or mark_price
+        prev_close = _coerce_float(ticker.get("openPrice")) or _coerce_float(ticker.get("prevClosePrice")) or mark_price
         realized_vol = abs(math.log(mark_price / prev_close)) * 100.0 if prev_close > 0 else 0.0
 
         # Depth metrics
@@ -266,6 +324,8 @@ class BinanceAdapter(MarketDataAdapter):
                 "symbol": symbol,
                 "premium_bps": premium_bps,
                 "day_quote_volume_usd": volume_24h,
+                "open_interest_contracts": oi_contracts,
+                "book_ticker_time": book_ticker.get("time"),
                 "funding_interval_hours": self._funding_interval_map.get(symbol, 8.0),
                 "_book_bids": bids,
                 "_book_asks": asks,
@@ -277,6 +337,8 @@ class BinanceAdapter(MarketDataAdapter):
         symbol: str,
         premium: dict,
         ticker: dict,
+        book_ticker: dict,
+        open_interest: Optional[float],
         latency_ms: float,
     ) -> MarketSnapshot:
         """Build snapshot using only batch data (no depth request)."""
@@ -297,17 +359,17 @@ class BinanceAdapter(MarketDataAdapter):
         if next_funding_ts and next_funding_ts > 0:
             next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000.0, tz=timezone.utc)
 
-        # Bid/ask from ticker
-        best_bid = _coerce_float(ticker.get("bidPrice")) or mark_price
-        best_ask = _coerce_float(ticker.get("askPrice")) or mark_price
+        # Bid/ask from official bookTicker batch endpoint.
+        best_bid = _coerce_float(book_ticker.get("bidPrice")) or mark_price
+        best_ask = _coerce_float(book_ticker.get("askPrice")) or mark_price
 
         # Volume & OI
         volume_24h = _coerce_float(ticker.get("quoteVolume")) or 0.0
-        oi_contracts = _coerce_float(ticker.get("openInterest")) or 0.0
+        oi_contracts = open_interest or 0.0
         oi_usd = oi_contracts * mark_price
 
         # Price change
-        prev_close = _coerce_float(ticker.get("prevClosePrice")) or mark_price
+        prev_close = _coerce_float(ticker.get("openPrice")) or _coerce_float(ticker.get("prevClosePrice")) or mark_price
         realized_vol = abs(math.log(mark_price / prev_close)) * 100.0 if prev_close > 0 else 0.0
 
         premium_bps = abs((mark_price - index_price) / max(index_price, 1e-9)) * 10_000.0
@@ -348,6 +410,8 @@ class BinanceAdapter(MarketDataAdapter):
                 "symbol": symbol,
                 "premium_bps": premium_bps,
                 "day_quote_volume_usd": volume_24h,
+                "open_interest_contracts": oi_contracts,
+                "book_ticker_time": book_ticker.get("time"),
                 "funding_interval_hours": self._funding_interval_map.get(symbol, 8.0),
                 "ticker_only": True,
             },

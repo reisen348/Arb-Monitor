@@ -16,6 +16,7 @@ from .gate import GateAdapter, GateAdapterConfig, GateApiError
 from .kraken import KrakenAdapter, KrakenAdapterConfig, KrakenApiError
 from .aster import AsterAdapter, AsterAdapterConfig, AsterApiError
 from .ondo import OndoAdapter, OndoAdapterConfig, OndoApiError
+from .variational import VariationalAdapter, VariationalAdapterConfig, VariationalApiError
 from .models import (
     ExecutionLegPlan,
     ExecutionPlan,
@@ -68,6 +69,9 @@ __all__ = [
     "OndoAdapter",
     "OndoAdapterConfig",
     "OndoApiError",
+    "VariationalAdapter",
+    "VariationalAdapterConfig",
+    "VariationalApiError",
     "PairingConfig",
     "PerpArbOpportunity",
     "PerpLegSnapshot",

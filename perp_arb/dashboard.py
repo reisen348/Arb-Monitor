@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from .cli import build_adapters
 from .payload import build_batch_payload
-from .market_data import ScannerConfig
+from .market_data import OpportunityBuilder, ScannerConfig
 from .models import ExecutionLabel
 from .persistence import StateStore
 from .practice import PracticeTracker
@@ -687,8 +687,9 @@ class _DashboardApp:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
-                if parsed.path == "/":
-                    self._respond_html(build_dashboard_html(app.refresh_seconds))
+                if parsed.path in {"/", "/rwa"}:
+                    page = "rwa" if parsed.path == "/rwa" else "main"
+                    self._respond_html(build_dashboard_html(app.refresh_seconds, page=page))
                     return
                 if parsed.path == "/api/dashboard":
                     if app._cached_payload is not None:
@@ -1447,8 +1448,16 @@ setInterval(refresh,REFRESH_MS);
 """
 
 
-def build_dashboard_html(refresh_seconds: float) -> str:
+def build_dashboard_html(refresh_seconds: float, page: str = "main") -> str:
     refresh_ms = int(refresh_seconds * 1000)
+    page_mode = "rwa" if page == "rwa" else "main"
+    main_tab_class = "page-tab active" if page_mode == "main" else "page-tab"
+    rwa_tab_class = "page-tab active" if page_mode == "rwa" else "page-tab"
+    rwa_stock_assets_json = json.dumps(sorted(
+        set(OpportunityBuilder.STOCK_OR_ETF_SYMBOLS)
+        | set(OpportunityBuilder.ASSET_ALIASES)
+        | set(OpportunityBuilder.ASSET_ALIASES.values())
+    ))
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1456,45 +1465,73 @@ def build_dashboard_html(refresh_seconds: float) -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PERP ARB · Funding Terminal</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
 :root{{
-  --bg:#000;--text:#d8d8df;--muted:#7b7b86;--faint:#353541;
-  --line:#2b2b34;--blue:#1683ff;--purple:#8b5cf6;
-  --green:#35d07f;--red:#ff5e6c;--amber:#f5b84b;--white:#f4f4f7;
+  /* Claude Code palette: warm charcoal + cream + coral */
+  --bg:#1a1915;--panel:#22211d;--panel2:#2a2925;
+  --line:#35332d;--line-h:#4a473f;
+  --text:#f0eee6;--muted:#9d9a8f;--faint:#67645a;
+  --accent:#d97757;--accent-soft:rgba(217,119,87,.13);
+  --green:#6abe8e;--red:#e5645e;--amber:#d5a054;--white:#faf9f5;
 }}
 *{{box-sizing:border-box}}
-html,body{{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:16px;line-height:1.15}}
+html,body{{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 'Inter',system-ui,-apple-system,sans-serif}}
 body{{min-height:100vh;overflow:hidden}}
-.screen{{height:100vh;max-width:1720px;margin:0 auto;padding:0 18px 14px;display:flex;flex-direction:column}}
-.controls{{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;padding:0 0 8px;border-bottom:1px dashed var(--line)}}
-.filters{{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center}}
-.slider{{display:flex;align-items:center;gap:9px;white-space:nowrap;color:var(--white);font-weight:700}}
-.slider input{{width:130px;accent-color:var(--blue)}}
-.checks{{display:flex;flex-wrap:wrap;gap:9px 13px;grid-column:1/-1;color:var(--white)}}
-.checks label{{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}}
-.checks input{{width:16px;height:16px;margin:0;accent-color:var(--white)}}
-.checks label.disabled{{color:#52525c}}
-.checks label.disabled input{{accent-color:#555}}
-.actions{{display:flex;align-items:center;gap:14px;justify-content:flex-end;color:var(--muted);font-size:13px;white-space:nowrap}}
+.mono{{font-family:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace}}
+::selection{{background:var(--accent-soft)}}
+::-webkit-scrollbar{{width:10px;height:10px}}
+::-webkit-scrollbar-thumb{{background:var(--line-h);border-radius:5px;border:2px solid var(--panel)}}
+::-webkit-scrollbar-track{{background:transparent}}
+.screen{{height:100vh;max-width:1720px;margin:0 auto;padding:0 20px 16px;display:flex;flex-direction:column;gap:12px}}
+
+/* topbar */
+.topbar{{display:flex;align-items:center;justify-content:space-between;padding:14px 2px 0}}
+.brand{{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:15px;letter-spacing:.04em;color:var(--white)}}
+.brand::before{{content:"✳";color:var(--accent);margin-right:9px;font-size:13px}}
+.brand span{{color:var(--accent);padding:0 2px}}
+.brand em{{font-style:normal;font-weight:400;font-size:11px;color:var(--faint);margin-left:12px;letter-spacing:.18em;text-transform:uppercase}}
+.topbar-meta{{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--muted)}}
+.topbar-meta .sep{{width:1px;height:12px;background:var(--line-h)}}
+
+/* controls panel */
+.controls{{display:grid;grid-template-columns:1fr auto;gap:10px 16px;align-items:start;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}}
+.filters{{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center}}
+.page-tabs{{display:flex;align-items:center;gap:6px;margin-right:2px}}
+.page-tab{{display:inline-flex;align-items:center;justify-content:center;height:28px;border:1px solid var(--line-h);border-radius:6px;padding:0 11px;color:var(--muted);text-decoration:none;font-size:12.5px;font-weight:600;white-space:nowrap;transition:border-color .15s,color .15s,background .15s}}
+.page-tab:hover{{border-color:var(--accent);color:var(--text)}}
+.page-tab.active{{background:var(--accent-soft);border-color:var(--accent);color:var(--white)}}
+.slider{{display:flex;align-items:center;gap:8px;white-space:nowrap;color:var(--text);font-size:12.5px;font-weight:500}}
+.slider span{{color:var(--accent);font-family:'JetBrains Mono',monospace;font-weight:600}}
+.slider input{{width:120px;accent-color:var(--accent)}}
+.checks{{display:flex;flex-wrap:wrap;gap:8px 14px;grid-column:1/-1;color:var(--muted);font-size:12.5px}}
+.checks label{{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;transition:color .15s}}
+.checks label:hover{{color:var(--text)}}
+.checks input{{width:14px;height:14px;margin:0;accent-color:var(--accent)}}
+.checks label.disabled{{color:var(--faint);cursor:default}}
+.checks label.disabled:hover{{color:var(--faint)}}
+.actions{{display:flex;align-items:center;gap:10px;justify-content:flex-end;color:var(--muted);font-size:12.5px;white-space:nowrap}}
 .status{{color:var(--muted)}}
-.search{{background:#030303;border:1px solid #1c1c24;color:var(--text);border-radius:3px;padding:3px 8px;font:inherit;font-size:13px;width:210px;outline:none}}
-.search:focus{{border-color:#444}}
-.blacklist-input{{width:118px}}
-.mini-btn{{background:#050508;border:1px solid #2b2b34;color:var(--text);border-radius:3px;padding:3px 8px;font:inherit;font-size:13px;cursor:pointer}}
-.mini-btn:hover{{border-color:#555;color:var(--white)}}
-.blacklist-tags{{display:flex;flex-wrap:wrap;gap:6px;grid-column:1/-1;color:var(--muted);font-size:12px}}
+.search{{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:5px 10px;font:inherit;font-size:12.5px;width:200px;outline:none;transition:border-color .15s}}
+.search::placeholder{{color:var(--faint)}}
+.search:focus{{border-color:var(--accent)}}
+.blacklist-input{{width:112px}}
+.mini-btn{{background:var(--accent-soft);border:1px solid transparent;color:var(--accent);border-radius:6px;padding:5px 12px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:background .15s,color .15s}}
+.mini-btn:hover{{background:var(--accent);color:var(--bg)}}
+.blacklist-tags{{display:flex;flex-wrap:wrap;gap:6px;grid-column:1/-1;font-size:12px}}
 .blacklist-tags:empty{{display:none}}
-.blacklist-tag{{background:#050508;border:1px solid #2b2b34;color:#d6d6dc;border-radius:3px;padding:2px 6px;font:inherit;font-size:12px;cursor:pointer}}
+.blacklist-tag{{background:var(--panel2);border:1px solid var(--line);color:var(--muted);border-radius:99px;padding:2px 10px;font:inherit;font-size:11.5px;cursor:pointer;transition:border-color .15s,color .15s}}
 .blacklist-tag:hover{{border-color:var(--red);color:var(--red)}}
-.table-wrap{{flex:1;min-height:0;overflow:auto;padding-top:12px}}
-table{{width:100%;border-collapse:collapse;table-layout:fixed}}
-thead th{{position:sticky;top:0;background:#000;color:#e5e5e8;font-weight:700;text-align:left;padding:4px 8px 7px;border-bottom:0;font-size:16px;white-space:nowrap}}
-tbody td{{padding:1px 8px;color:#9d9da7;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:top}}
-tbody tr{{height:22px}}
-tbody tr:hover td{{background:#08080d;color:#d6d6dc}}
+
+/* table */
+.table-wrap{{flex:1;min-height:0;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px}}
+table{{width:100%;border-collapse:collapse;table-layout:fixed;font-family:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace}}
+thead th{{position:sticky;top:0;z-index:2;background:var(--panel);color:var(--muted);font-weight:500;text-align:left;padding:10px;border-bottom:1px solid var(--line);font-size:12px;letter-spacing:.04em;white-space:nowrap}}
+tbody td{{padding:5px 10px;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;border-bottom:1px solid rgba(255,255,255,.03)}}
+tbody tr{{transition:background .12s}}
+tbody tr:hover td{{background:var(--panel2);color:var(--text)}}
 .num{{text-align:right;font-variant-numeric:tabular-nums}}
 .venue{{width:132px}}
-.symbol{{width:164px;color:#c8c8d0}}
+.symbol{{width:164px;color:#cfccc2}}
 .spread{{width:164px}}
 .stdspread{{width:126px}}
 .funddir{{width:96px}}
@@ -1505,22 +1542,23 @@ tbody tr:hover td{{background:#08080d;color:#d6d6dc}}
 .apr{{width:124px}}
 .fund{{width:156px}}
 .limit{{width:126px}}
-.sortable{{cursor:pointer;user-select:none}}
-.sortable:hover{{color:var(--blue)}}
-.symbol-btn{{cursor:pointer;color:#dcdce4}}
-.symbol-btn:hover{{color:var(--blue)}}
-.dim{{color:var(--muted)}}
+.sortable{{cursor:pointer;user-select:none;transition:color .15s}}
+.sortable:hover{{color:var(--accent)}}
+.symbol-btn{{cursor:pointer;color:var(--text);transition:color .15s}}
+.symbol-btn:hover{{color:var(--accent)}}
+.dim{{color:var(--faint)}}
 .positive{{color:var(--green)}}
 .negative{{color:var(--red)}}
-.neutral{{color:#b8b8c0}}
-.empty{{padding:48px;text-align:center;color:var(--muted)}}
-.small{{font-size:13px;color:var(--muted)}}
-.row-blocked td{{color:#696973}}
-.row-watch td{{color:#b6a56e}}
-.row-tradable td{{color:#d6d6dc}}
+.neutral{{color:#c9c6bc}}
+.empty{{padding:56px 24px;text-align:center;color:var(--muted);font-family:'Inter',system-ui,sans-serif}}
+.small{{font-size:12.5px;color:var(--muted)}}
+.row-blocked td{{color:var(--faint)}}
+.row-watch td{{color:#c2a163}}
+.row-tradable td{{color:#dedbd1}}
 @media(max-width:900px){{
   body{{overflow:auto}}
-  .screen{{height:auto;min-height:100vh;padding:0 10px 12px}}
+  .screen{{height:auto;min-height:100vh;padding:0 12px 12px}}
+  .topbar{{padding-top:10px}}
   .controls{{grid-template-columns:1fr}}
   .actions{{justify-content:flex-start;flex-wrap:wrap}}
   .table-wrap{{overflow-x:auto}}
@@ -1530,8 +1568,20 @@ tbody tr:hover td{{background:#08080d;color:#d6d6dc}}
 </head>
 <body>
 <div class="screen">
+  <div class="topbar">
+    <div class="brand">PERP<span>/</span>ARB<em>Funding Terminal</em></div>
+    <div class="topbar-meta">
+      <span class="status" id="status-text">启动中...</span>
+      <span class="sep"></span>
+      <span class="status mono" id="clock">--:--:--</span>
+    </div>
+  </div>
   <div class="controls">
     <div class="filters">
+      <nav class="page-tabs" aria-label="页面">
+        <a class="{main_tab_class}" href="/">全部</a>
+        <a class="{rwa_tab_class}" href="/rwa">RWA 股票</a>
+      </nav>
       <label class="slider">未平仓额 ≥ <span id="oi-label">$1M</span><input id="oi-slider" type="range" min="0" max="100" value="0"></label>
       <label class="slider">日成交额 ≥ <span id="vol-label">$1M</span><input id="vol-slider" type="range" min="0" max="100" value="0"></label>
       <label class="slider">间隔≤<span id="interval-label">*H</span><input id="interval-slider" type="range" min="0" max="100" value="100"></label>
@@ -1540,8 +1590,6 @@ tbody tr:hover td{{background:#08080d;color:#d6d6dc}}
       <input id="search-input" class="search" placeholder="搜索币种/交易所" oninput="applyFilters()">
       <input id="blacklist-input" class="search blacklist-input" placeholder="拉黑币种" onkeydown="if(event.key==='Enter')addBlacklistAsset()">
       <button type="button" class="mini-btn" onclick="addBlacklistAsset()">拉黑</button>
-      <span class="status" id="status-text">启动中...</span>
-      <span class="status" id="clock">--:--:--</span>
     </div>
     <div class="checks" id="venue-checks"></div>
     <div class="blacklist-tags" id="blacklist-tags"></div>
@@ -1570,9 +1618,11 @@ tbody tr:hover td{{background:#08080d;color:#d6d6dc}}
 </div>
 <script>
 const REFRESH_MS={refresh_ms};
+const PAGE_MODE="{page_mode}";
 const $=id=>document.getElementById(id);
-const ALL_VENUES=["Binance","Bybit","OKX","Bitget","Gate","Kraken","Aster","Hyperliquid","Lighter","Grvt","Paradex","Nado","Ondo"];
+const ALL_VENUES=["Binance","Bybit","OKX","Bitget","Gate","Kraken","Aster","Hyperliquid","Lighter","Grvt","Paradex","Nado","Ondo","Variational"];
 const ACTIVE_HINTS=new Set(ALL_VENUES);
+const RWA_STOCK_ASSETS=new Set({rwa_stock_assets_json});
 const DEFAULT_VISIBLE_ROWS=20;
 const DISPLAY_MIN_OI_USD=25000;
 const DISPLAY_MIN_VOLUME_USD=50000;
@@ -1597,6 +1647,14 @@ function normAsset(v){{
 }}
 function assetKeys(item){{return [item.asset,item.venue_a_asset,item.venue_b_asset].map(normAsset).filter(Boolean)}}
 function isBlacklistedAsset(item){{return assetKeys(item).some(asset=>blacklistedAssets.has(asset))}}
+function isRwaStock(item){{
+  if(item.is_rwa_stock===true)return true;
+  if(item.is_rwa_stock===false)return false;
+  const family=String(item.market_family||"").toLowerCase();
+  if(family==="stock")return true;
+  if(family==="crypto")return false;
+  return assetKeys(item).some(asset=>RWA_STOCK_ASSETS.has(asset));
+}}
 function localBlacklist(){{
   try{{
     const raw=JSON.parse(localStorage.getItem(BLACKLIST_STORAGE_KEY)||"[]");
@@ -1777,6 +1835,7 @@ function initControls(){{
 }}
 function matches(item,m){{
   if(isBlacklistedAsset(item))return false;
+  if(PAGE_MODE==="rwa"&&!isRwaStock(item))return false;
   const q=($("search-input").value||"").trim().toLowerCase();
   if(q){{
     const hay=[item.asset,item.quote,item.venue_a,item.venue_b,item.venue_a_asset,item.venue_b_asset].join(" ").toLowerCase();
@@ -1834,7 +1893,7 @@ function renderTable(rows){{
     return sortAnnualDir*(a.m.annual-b.m.annual);
   }});
   const filtered=sorted.slice(0,DEFAULT_VISIBLE_ROWS);
-  if(!filtered.length){{tb.innerHTML=`<tr><td colspan="12" class="empty">无匹配结果</td></tr>`;return}}
+  if(!filtered.length){{tb.innerHTML=`<tr><td colspan="12" class="empty">${{PAGE_MODE==="rwa"?"无RWA股票匹配结果":"无匹配结果"}}</td></tr>`;return}}
   tb.innerHTML=filtered.map(({{item,m}})=>{{
     const spreadDigits=priceDigits(m.spread.abs);
     const spreadClr=m.spread.pct>=1?"positive":m.spread.pct>=0.25?"neutral":"dim";

@@ -30,6 +30,7 @@ from .nado import NadoAdapter, NadoAdapterConfig
 from .ondo import OndoAdapter, OndoAdapterConfig
 from .okx import OkxAdapter, OkxAdapterConfig
 from .paradex import ParadexAdapter, ParadexAdapterConfig
+from .variational import VariationalAdapter, VariationalAdapterConfig
 from .market_data import MockMarketDataAdapter, ScannerConfig
 from .models import ExecutionLabel, ScoredOpportunity
 from .payload import build_batch_payload
@@ -104,9 +105,10 @@ def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
         "--source",
         choices=[
             "mock", "hyperliquid", "grvt", "paradex", "lighter", "nado", "ondo",
+            "variational",
             "binance", "okx", "bybit", "bitget", "gate", "kraken", "aster",
             "hyperliquid_grvt", "hyperliquid_paradex", "hyperliquid_lighter",
-            "cex", "dex", "all_live",
+            "binance_bybit", "cex", "dex", "all_live",
         ],
         default="mock",
         help="Market data source to scan.",
@@ -147,6 +149,12 @@ def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
         help="Fetch full orderbooks only for the top N markets by volume/OI.",
     )
     parser.add_argument(
+        "--binance-oi-markets",
+        type=int,
+        default=100,
+        help="Top N Binance markets to fetch official open interest for, independent of --top-book-markets.",
+    )
+    parser.add_argument(
         "--lighter-book-request-workers",
         type=int,
         default=4,
@@ -174,6 +182,45 @@ def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="Override --top-book-markets for GRVT only (default: 100, since GRVT has ~95 perps).",
+    )
+    parser.add_argument(
+        "--variational-min-volume",
+        type=float,
+        default=50_000.0,
+        help="Minimum Variational 24h volume in USDC for BTC/ETH/SOL and RWA universe selection.",
+    )
+    parser.add_argument(
+        "--variational-min-oi",
+        type=float,
+        default=10_000.0,
+        help="Minimum Variational long+short open interest in USDC for universe selection.",
+    )
+    parser.add_argument(
+        "--variational-indicative-markets",
+        type=int,
+        default=20,
+        help="Top Variational WS candidates to verify with /api/quotes/indicative each scan.",
+    )
+    parser.add_argument(
+        "--variational-indicative-qty",
+        default="0.001",
+        help="Quantity used for Variational /api/quotes/indicative candidate verification.",
+    )
+    parser.add_argument(
+        "--variational-forwarder-snapshot",
+        default=None,
+        help="Optional monitor_state.json from a Variational Chrome CDP forwarder; fresh indicative quotes can override stats-mark fallback.",
+    )
+    parser.add_argument(
+        "--variational-forwarder-quote-ttl",
+        type=float,
+        default=15.0,
+        help="Maximum age in seconds for Variational Chrome forwarder indicative quotes.",
+    )
+    parser.add_argument(
+        "--variational-no-stats-mark-fallback",
+        action="store_true",
+        help="Disable Variational RWA metadata/stats mark fallback when /prices WS does not support a stock instrument.",
     )
 
 
@@ -210,6 +257,9 @@ def _add_dashboard_persistence_arguments(parser: argparse.ArgumentParser) -> Non
     parser.add_argument("--forward-points", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument("--reversion-ratio", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument("--lookback-hours", type=float, default=12.0, help=argparse.SUPPRESS)
+    parser.add_argument("--scan-timeout", type=float, default=30.0, help=argparse.SUPPRESS)
+    parser.add_argument("--error-log-interval", type=float, default=120.0, help=argparse.SUPPRESS)
+    parser.add_argument("--max-backoff", type=float, default=300.0, help=argparse.SUPPRESS)
 
 
 def main(argv: Optional[Sequence[str]] = None, out: Optional[TextIO] = None) -> int:
@@ -283,6 +333,24 @@ def _lighter_top_book(args: argparse.Namespace) -> int:
     return 15
 
 
+def _binance_oi_markets(args: argparse.Namespace) -> int:
+    return max(0, int(getattr(args, "binance_oi_markets", 100)))
+
+
+def _variational_config(args: argparse.Namespace) -> VariationalAdapterConfig:
+    return VariationalAdapterConfig(
+        assets=args.assets,
+        timeout_seconds=args.timeout,
+        min_volume_usd=max(0.0, float(args.variational_min_volume)),
+        min_oi_usd=max(0.0, float(args.variational_min_oi)),
+        indicative_quote_markets=max(0, int(args.variational_indicative_markets)),
+        indicative_quote_qty=str(args.variational_indicative_qty),
+        forwarder_snapshot_path=args.variational_forwarder_snapshot,
+        forwarder_quote_ttl_seconds=max(0.5, float(args.variational_forwarder_quote_ttl)),
+        enable_stats_mark_fallback=not bool(args.variational_no_stats_mark_fallback),
+    )
+
+
 def build_adapters(args: argparse.Namespace):
     if args.source == "hyperliquid":
         if args.transport == "ws":
@@ -338,6 +406,7 @@ def build_adapters(args: argparse.Namespace):
                     assets=args.assets,
                     timeout_seconds=args.timeout,
                     top_book_markets=args.top_book_markets,
+                    oi_markets=_binance_oi_markets(args),
                 )
             )
         ]
@@ -361,6 +430,8 @@ def build_adapters(args: argparse.Namespace):
                 )
             )
         ]
+    if args.source == "binance_bybit":
+        return _build_binance_bybit_adapters(args)
     if args.source == "bitget":
         return [
             BitgetAdapter(
@@ -442,6 +513,8 @@ def build_adapters(args: argparse.Namespace):
                 )
             )
         ]
+    if args.source == "variational":
+        return [VariationalAdapter(_variational_config(args))]
     if args.source == "hyperliquid_grvt":
         if args.transport == "ws":
             return [
@@ -536,7 +609,7 @@ def _build_cex_adapters(args):
     transport = getattr(args, "transport", "rest")
     if transport == "ws":
         return [
-            BinanceWebsocketAdapter(BinanceAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
+            BinanceWebsocketAdapter(BinanceAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets, oi_markets=_binance_oi_markets(args))),
             OkxWebsocketAdapter(OkxAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
             BybitWebsocketAdapter(BybitAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
             BitgetAdapter(BitgetAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
@@ -545,13 +618,26 @@ def _build_cex_adapters(args):
             AsterAdapter(AsterAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
         ]
     return [
-        BinanceAdapter(BinanceAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
+        BinanceAdapter(BinanceAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets, oi_markets=_binance_oi_markets(args))),
         OkxAdapter(OkxAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
         BybitAdapter(BybitAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
         BitgetAdapter(BitgetAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
         GateAdapter(GateAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
         KrakenAdapter(KrakenAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
         AsterAdapter(AsterAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
+    ]
+
+
+def _build_binance_bybit_adapters(args):
+    transport = getattr(args, "transport", "rest")
+    if transport == "ws":
+        return [
+            BinanceWebsocketAdapter(BinanceAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets, oi_markets=_binance_oi_markets(args))),
+            BybitWebsocketAdapter(BybitAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
+        ]
+    return [
+        BinanceAdapter(BinanceAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets, oi_markets=_binance_oi_markets(args))),
+        BybitAdapter(BybitAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
     ]
 
 
@@ -565,6 +651,7 @@ def _build_dex_adapters(args):
             LighterAdapter(LighterAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=_lighter_top_book(args), book_request_workers=args.lighter_book_request_workers)),
             NadoAdapter(NadoAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
             OndoAdapter(OndoAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
+            VariationalAdapter(_variational_config(args)),
         ]
     return [
         HyperliquidAdapter(HyperliquidAdapterConfig(assets=args.assets, dex=args.hyperliquid_dex, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
@@ -573,6 +660,7 @@ def _build_dex_adapters(args):
         LighterAdapter(LighterAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=_lighter_top_book(args), book_request_workers=args.lighter_book_request_workers)),
         NadoAdapter(NadoAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
         OndoAdapter(OndoAdapterConfig(assets=args.assets, timeout_seconds=args.timeout, top_book_markets=args.top_book_markets)),
+        VariationalAdapter(_variational_config(args)),
     ]
 
 

@@ -518,8 +518,7 @@ class KrakenAdapter(MarketDataAdapter):
         oi_usd = oi_base * mark_price
         if oi_usd <= 0 and volume_24h > 0:
             oi_usd = volume_24h * 0.1
-        # Kraken Futures publishes fundingRate in percentage points.
-        funding_rate_bps = (_coerce_float(ticker.get("fundingRate")) or 0.0) * 100.0
+        funding_rate_bps = _kraken_funding_rate_bps(ticker, index_price or mark_price)
         prev_price = _coerce_float(ticker.get("open24h")) or mark_price
         realized_vol = abs(math.log(mark_price / prev_price)) * 100.0 if prev_price > 0 and mark_price > 0 else 0.0
         mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else mark_price
@@ -529,6 +528,8 @@ class KrakenAdapter(MarketDataAdapter):
             "symbol": symbol,
             "day_quote_volume_usd": volume_24h,
             "funding_interval_hours": 1.0,
+            "funding_rate_source": "relativeFundingRate" if ticker.get("relativeFundingRate") is not None else "fundingRate/indexPrice",
+            "funding_rate_raw": ticker.get("fundingRate"),
         }
         if stock_like:
             metadata["stock_like"] = True
@@ -855,6 +856,21 @@ def _kraken_asset_quote(ticker: dict) -> Tuple[str, str, bool]:
     if asset == "XBT":
         asset = "BTC"
     return asset, quote, stock_like
+
+
+def _kraken_funding_rate_bps(ticker: dict, reference_price: float) -> float:
+    relative = _coerce_float(ticker.get("relativeFundingRate"))
+    if relative is not None:
+        return relative * 10_000.0
+    absolute = _coerce_float(ticker.get("fundingRate"))
+    if absolute is None:
+        return 0.0
+    if reference_price <= 0:
+        return 0.0
+    # Kraken Futures ticker fundingRate is an absolute price amount per
+    # settlement.  Historical funding also exposes relativeFundingRate, where
+    # relativeFundingRate ~= fundingRate / indexPrice.
+    return absolute / reference_price * 10_000.0
 
 
 def _gate_volume_usd(ticker: dict) -> float:

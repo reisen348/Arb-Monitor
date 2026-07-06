@@ -104,6 +104,9 @@ def _fee_roles(opp, bucket: str):
 def _serialize_opportunity(scored: ScoredOpportunity, config: ScoringConfig) -> dict:
     opp = scored.opportunity
     br = scored.breakdown
+    metadata = opp.metadata or {}
+    market_family = str(metadata.get("market_family") or ("stock" if metadata.get("stock_like") else "crypto")).lower()
+    is_rwa_stock = market_family == "stock" or bool(metadata.get("stock_like"))
     max_funding_change = max(abs(opp.leg_a.funding_change_bps), abs(opp.leg_b.funding_change_bps))
     max_oi_change = max(abs(opp.leg_a.oi_change_pct), abs(opp.leg_b.oi_change_pct))
     role_a, fee_a, role_b, fee_b = _fee_roles(opp, br.bucket_type.value)
@@ -114,8 +117,10 @@ def _serialize_opportunity(scored: ScoredOpportunity, config: ScoringConfig) -> 
         "venue_b": opp.leg_b.venue,
         "venue_a_asset": opp.leg_a.asset or opp.asset,
         "venue_b_asset": opp.leg_b.asset or opp.asset,
-        "venue_a_ticker_only": bool(opp.metadata.get("leg_a_ticker_only")),
-        "venue_b_ticker_only": bool(opp.metadata.get("leg_b_ticker_only")),
+        "venue_a_ticker_only": bool(metadata.get("leg_a_ticker_only")),
+        "venue_b_ticker_only": bool(metadata.get("leg_b_ticker_only")),
+        "market_family": market_family,
+        "is_rwa_stock": is_rwa_stock,
         "label": scored.label.value,
         "label_display": label_display(scored.label.value),
         "bucket": br.bucket_type.value,

@@ -49,24 +49,46 @@ class FakeBinanceClient(BinanceClient):
                     {
                         "symbol": "BTCUSDT",
                         "lastPrice": "68003.0",
-                        "bidPrice": "68000.0",
-                        "askPrice": "68010.0",
                         "quoteVolume": "5000000000.0",
-                        "openInterest": "125.5",
+                        "openPrice": "67000.0",
                         "priceChangePercent": "1.2",
                     },
                     {
                         "symbol": "ETHUSDT",
                         "lastPrice": "3399.0",
-                        "bidPrice": "3398.0",
-                        "askPrice": "3402.0",
                         "quoteVolume": "2000000000.0",
-                        "openInterest": "5000.0",
+                        "openPrice": "3350.0",
                         "priceChangePercent": "-0.5",
                     },
                 ],
                 30.0,
             )
+        if "ticker/bookTicker" in path:
+            return (
+                [
+                    {
+                        "symbol": "BTCUSDT",
+                        "bidPrice": "68000.0",
+                        "bidQty": "3.0",
+                        "askPrice": "68010.0",
+                        "askQty": "2.8",
+                        "time": 1700000000000,
+                    },
+                    {
+                        "symbol": "ETHUSDT",
+                        "bidPrice": "3398.0",
+                        "bidQty": "45.0",
+                        "askPrice": "3402.0",
+                        "askQty": "38.0",
+                        "time": 1700000000000,
+                    },
+                ],
+                28.0,
+            )
+        if "openInterest" in path:
+            symbol = path.rsplit("=", 1)[-1]
+            values = {"BTCUSDT": "125.5", "ETHUSDT": "5000.0"}
+            return ({"symbol": symbol, "openInterest": values[symbol], "time": 1700000000000}, 15.0)
         if "depth" in path:
             return (
                 {
@@ -104,6 +126,8 @@ class BinanceAdapterTest(unittest.TestCase):
         self.assertAlmostEqual(s.funding_rate_bps, 1.0)
         self.assertAlmostEqual(s.taker_fee_bps, 4.5)
         self.assertGreater(s.oi_usd, 0.0)
+        self.assertIn("fapi/v1/ticker/bookTicker", adapter.client.requests)
+        self.assertIn("fapi/v1/openInterest?symbol=BTCUSDT", adapter.client.requests)
 
     def test_filters_out_non_usdt_contracts(self) -> None:
         adapter = BinanceAdapter(

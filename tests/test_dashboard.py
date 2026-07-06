@@ -58,6 +58,12 @@ class DashboardHtmlTest(unittest.TestCase):
     def test_dashboard_html_contains_core_sections(self) -> None:
         html = build_dashboard_html(refresh_seconds=2.5)
         self.assertIn("Funding Terminal", html)
+        self.assertIn("warm charcoal + cream + coral", html)
+        self.assertIn("--accent:#d97757", html)
+        self.assertIn('<div class="topbar">', html)
+        self.assertIn('<div class="brand">PERP<span>/</span>ARB<em>Funding Terminal</em></div>', html)
+        self.assertIn(".table-wrap{flex:1;min-height:0;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px}", html)
+        self.assertNotIn("--bg:#000;--text:#d8d8df", html)
         self.assertIn("/api/dashboard", html)
         self.assertIn("tbl-body", html)
         self.assertIn("2500", html)  # REFRESH_MS
@@ -99,7 +105,7 @@ class DashboardHtmlTest(unittest.TestCase):
         self.assertIn('colspan="12"', html)
         self.assertIn("toggleSpreadSort()", html)
         self.assertIn('activeSort==="spread"', html)
-        self.assertIn('const ALL_VENUES=["Binance","Bybit","OKX","Bitget","Gate","Kraken","Aster","Hyperliquid","Lighter","Grvt","Paradex","Nado","Ondo"];', html)
+        self.assertIn('const ALL_VENUES=["Binance","Bybit","OKX","Bitget","Gate","Kraken","Aster","Hyperliquid","Lighter","Grvt","Paradex","Nado","Ondo","Variational"];', html)
         self.assertIn("const ACTIVE_HINTS=new Set(ALL_VENUES);", html)
         for venue in ["Coinbase", "HTX", "KuCoin", "MEXC", "Backpack", "Ethereal", "Pacifica", "Extended", "StandX", "ApeX Omni"]:
             self.assertNotIn(venue, html)
@@ -125,6 +131,14 @@ class DashboardHtmlTest(unittest.TestCase):
         self.assertIn("function assetKeys(item)", html)
         self.assertIn("function isBlacklistedAsset(item)", html)
         self.assertIn("return assetKeys(item).some(asset=>blacklistedAssets.has(asset))", html)
+        self.assertIn('href="/rwa"', html)
+        self.assertIn('const PAGE_MODE="main";', html)
+        self.assertIn("const RWA_STOCK_ASSETS=new Set", html)
+        self.assertIn('"DRAM"', html)
+        self.assertIn('"PAXG"', html)
+        self.assertIn('"WTI"', html)
+        self.assertIn("function isRwaStock(item)", html)
+        self.assertIn('if(PAGE_MODE==="rwa"&&!isRwaStock(item))return false;', html)
         self.assertIn("localStorage.setItem(BLACKLIST_STORAGE_KEY", html)
         self.assertIn('fetch("/api/asset-blacklist"', html)
         self.assertIn('JSON.stringify({assets:[...blacklistedAssets]})', html)
@@ -154,7 +168,7 @@ class DashboardHtmlTest(unittest.TestCase):
         self.assertIn("Bitget", html)
         self.assertIn("Gate", html)
         self.assertIn("Kraken", html)
-        self.assertIn('"Aster","Hyperliquid","Lighter","Grvt","Paradex","Nado","Ondo"', html)
+        self.assertIn('"Aster","Hyperliquid","Lighter","Grvt","Paradex","Nado","Ondo","Variational"', html)
         self.assertIn("Aster", html)
         self.assertNotIn("dedupeKey", html)
         self.assertNotIn("/api/backtest", html)
@@ -162,6 +176,14 @@ class DashboardHtmlTest(unittest.TestCase):
         self.assertNotIn("历史验证概览", html)
         self.assertNotIn("热点聚合", html)
         self.assertNotIn("候选卡片", html)
+
+    def test_rwa_dashboard_html_enables_stock_only_page(self) -> None:
+        html = build_dashboard_html(refresh_seconds=2.5, page="rwa")
+
+        self.assertIn('const PAGE_MODE="rwa";', html)
+        self.assertIn('class="page-tab active" href="/rwa">RWA 股票</a>', html)
+        self.assertIn("无RWA股票匹配结果", html)
+        self.assertIn("item.is_rwa_stock===true", html)
 
     def test_opportunity_zscore_window_points_tracks_four_hours(self) -> None:
         self.assertEqual(_opportunity_zscore_window_points(10), 1440)

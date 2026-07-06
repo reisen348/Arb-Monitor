@@ -10,15 +10,16 @@ DB_PATH="${DB_PATH:-arb_state.db}"
 
 DASHBOARD_CMD=(
   python3 -u -m perp_arb dashboard
-  --source all_live
+  --source "${SOURCE:-all_live}"
   --transport "${TRANSPORT:-rest}"
   --top "${TOP:-10000}"
   --min-label blocked
-  --refresh "${REFRESH:-10}"
+  --refresh "${REFRESH:-30}"
   --interval "${INTERVAL:-10}"
   --host "$HOST"
   --port "$PORT"
   --top-book-markets "${TOP_BOOK_MARKETS:-25}"
+  --binance-oi-markets "${BINANCE_OI_MARKETS:-100}"
   --grvt-top-book-markets "${GRVT_TOP_BOOK_MARKETS:-100}"
   --lighter-book-request-workers "${LIGHTER_BOOK_REQUEST_WORKERS:-1}"
   --db-path "$DB_PATH"
@@ -46,6 +47,8 @@ start_dashboard() {
     source .env
     set +a
   fi
+  export ARB_COINGECKO_SOURCES=""
+  export ARB_EXCLUDE_SOURCES=""
 
   if command -v setsid >/dev/null 2>&1 && setsid true >/dev/null 2>&1; then
     setsid "${DASHBOARD_CMD[@]}" >>"$LOG_FILE" 2>&1 < /dev/null &

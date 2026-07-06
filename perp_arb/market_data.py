@@ -111,16 +111,19 @@ class OpportunityBuilder:
     STOCK_LIKE_VENUES = {"aster", "bitget", "okx", "hyperliquid:xyz"}
     DYNAMIC_STOCK_INFERENCE_VENUES = {"okx"}
     STOCK_OR_ETF_SYMBOLS = {
-        "AAPL", "AAOI", "ADBE", "ADVANTEST", "AMD", "AMAT", "AMZN", "ANTHROPIC",
-        "ARM", "ASML", "ASTS", "AVGO", "AXTI", "BBX", "BE", "BMNR", "BP", "BRKB",
-        "BX", "CAT", "COHR", "COIN", "COST", "CRM", "CRCL", "CRDO", "CRWD",
-        "CSCO", "DELL", "DIS", "DKNG", "EBAY", "EWJ", "EWZ", "EWT", "FLNC",
-        "FUTU", "GME", "GOOG", "GOOGL", "HD", "HIMS", "HPE", "HYUNDAI",
-        "IBM", "IONQ", "IREN", "IWM", "JPM", "LLY", "META", "MRVL", "MSFT",
-        "MSTR", "MU", "NBIS", "NFLX", "NOK", "NOW", "NVDA", "NVO", "OPENAI", "ORCL",
-        "PLTR", "QCOM", "QQQ", "RKLB", "RIVN", "CRM", "RTX", "SAMSUNG", "SKHYNIX",
-        "SOXL", "SPY", "SPCX", "MINIMAX", "TSLA", "UBER", "URNM", "USAR", "UVXY", "V",
-        "WDC", "WMT", "XLE", "ZM",
+        "AAPL", "AAOI", "ADBE", "ADVANTEST", "ALAB", "AMD", "AMAT", "AMZN", "ANTHROPIC",
+        "ARM", "ASML", "ASTS", "AVGO", "AXTI", "BABA", "BB", "BBX", "BE", "BMNR", "BOT",
+        "BP", "BRKB", "BX", "BZ", "CAT", "CBRS", "CGNX", "CIEN", "CL", "COHR", "COIN",
+        "COST", "CRM", "CRCL", "CRDO", "CRWD", "CRWV", "CSCO", "DELL", "DIS", "DKNG",
+        "DRAM", "EBAY", "EWJ", "EWY", "EWZ", "EWT", "FLNC", "FUTU", "GEV", "GLW", "GME",
+        "GOOG", "GOOGL", "HD", "HIMS", "HOOD", "HPE", "HYUNDAI", "IBM", "INTC", "IONQ",
+        "IREN", "ISRG", "IWM", "JPM", "KLAC", "KORU", "LITE", "LLY", "LRCX", "META",
+        "MINIMAX", "MRVL", "MSFT", "MSTR", "MU", "MUU", "MVLL", "NATGAS", "NBIS", "NFLX",
+        "NOK", "NOW", "NVDA", "NVO", "ONDS", "OPENAI", "ORCL", "PAXG", "PLTR", "QCOM",
+        "QQQ", "RKLB", "RIVN", "RTX", "SAMSUNG", "SKHYNIX", "SMCI", "SMH", "SNDK", "SONY",
+        "SOXL", "SPCX", "SPY", "STRC", "TER", "TQQQ", "TSEM", "TSLA", "TSM", "TWLO",
+        "UBER", "URNM", "USAR", "UVXY", "V", "VRT", "WDC", "WMT", "WTI", "XAG", "XAU",
+        "XAUT", "XCU", "XLE", "XPD", "XPT", "ZHIPU", "ZM",
     }
 
     def build(self, snapshots: Iterable[MarketSnapshot]) -> List[PerpArbOpportunity]:
@@ -148,7 +151,7 @@ class OpportunityBuilder:
             grouped.setdefault((asset, quote, market_family), []).append(best_by_venue[(asset, quote, market_family, venue)])
 
         opportunities: List[PerpArbOpportunity] = []
-        for (asset, quote, _market_family), markets in grouped.items():
+        for (asset, quote, market_family), markets in grouped.items():
             if len(markets) < 2:
                 continue
             ordered_markets = sorted(markets, key=lambda item: item.venue)
@@ -156,7 +159,7 @@ class OpportunityBuilder:
                 for snapshot_b in ordered_markets[index + 1:]:
                     if self._price_alignment_suspect(snapshot_a, snapshot_b):
                         continue
-                    opportunities.append(self._build_opportunity(asset, quote, snapshot_a, snapshot_b))
+                    opportunities.append(self._build_opportunity(asset, quote, snapshot_a, snapshot_b, market_family))
         return opportunities
 
     @classmethod
@@ -255,6 +258,7 @@ class OpportunityBuilder:
         quote: str,
         snapshot_a: MarketSnapshot,
         snapshot_b: MarketSnapshot,
+        market_family: str = "crypto",
     ) -> PerpArbOpportunity:
         leg_a = self._build_leg(snapshot_a)
         leg_b = self._build_leg(snapshot_b)
@@ -310,6 +314,8 @@ class OpportunityBuilder:
             now=now,
             metadata={
                 "pair": f"{snapshot_a.venue}:{snapshot_b.venue}",
+                "market_family": market_family,
+                "stock_like": market_family == "stock",
                 "leg_a_source": snapshot_a.metadata.get("source", snapshot_a.venue),
                 "leg_b_source": snapshot_b.metadata.get("source", snapshot_b.venue),
                 "leg_a_ticker_only": bool(snapshot_a.metadata.get("ticker_only")),

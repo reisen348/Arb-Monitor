@@ -172,6 +172,8 @@ class PayloadSourceLatencyTest(unittest.TestCase):
         self.assertEqual(serialized["next_funding_b"], (now + timedelta(hours=8)).isoformat())
         self.assertFalse(serialized["venue_a_ticker_only"])
         self.assertTrue(serialized["venue_b_ticker_only"])
+        self.assertEqual(serialized["market_family"], "crypto")
+        self.assertFalse(serialized["is_rwa_stock"])
         self.assertEqual(serialized["maker_fee_a_bps"], 0.4)
         self.assertEqual(serialized["taker_fee_a_bps"], 2.0)
         self.assertEqual(serialized["maker_fee_b_bps"], -0.1)

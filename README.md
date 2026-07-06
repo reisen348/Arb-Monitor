@@ -33,8 +33,11 @@ Current adapters include:
 - Lighter
 - Nado
 - Ondo Perps
+- Variational Omni
 
-Most adapters use public REST endpoints. WebSocket support exists for a subset of venues, but the default dashboard command uses REST because it is simpler to operate.
+Binance and Bybit use their official public exchange APIs. The packaged dashboard service keeps the broad `all_live` source set, but explicitly disables third-party Binance/Bybit fallback sources.
+
+Variational uses official `metadata/stats` for universe discovery and `/prices` WebSocket data for live BTC/ETH/SOL-style price streams. If you run a Chrome CDP forwarder that writes a `monitor_state.json` with fresh `/api/quotes/indicative` responses, pass `--variational-forwarder-snapshot /path/to/monitor_state.json` to let those fresh quotes override the conservative RWA stats-mark fallback while the file is still within `--variational-forwarder-quote-ttl`.
 
 ## Requirements
 
@@ -81,11 +84,12 @@ python3 -m perp_arb dashboard \
   --transport rest \
   --top 10000 \
   --min-label blocked \
-  --refresh 10 \
+  --refresh 30 \
   --interval 10 \
   --host 0.0.0.0 \
   --port 8765 \
   --top-book-markets 2 \
+  --binance-oi-markets 100 \
   --lighter-book-request-workers 1 \
   --db-path arb_state.db
 ```
