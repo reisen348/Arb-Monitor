@@ -1501,8 +1501,8 @@ body{{min-height:100vh;overflow:hidden}}
 .page-tab:hover{{border-color:var(--accent);color:var(--text)}}
 .page-tab.active{{background:var(--accent-soft);border-color:var(--accent);color:var(--white)}}
 .slider{{display:flex;align-items:center;gap:8px;white-space:nowrap;color:var(--text);font-size:12.5px;font-weight:500}}
-.slider span{{color:var(--accent);font-family:'JetBrains Mono',monospace;font-weight:600}}
-.slider input{{width:120px;accent-color:var(--accent)}}
+.slider span{{display:inline-block;min-width:64px;text-align:right;color:var(--accent);font-family:'JetBrains Mono',monospace;font-weight:600;font-variant-numeric:tabular-nums}}
+.slider input{{width:220px;accent-color:var(--accent)}}
 .checks{{display:flex;flex-wrap:wrap;gap:8px 14px;grid-column:1/-1;color:var(--muted);font-size:12.5px}}
 .checks label{{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;transition:color .15s}}
 .checks label:hover{{color:var(--text)}}
@@ -1582,9 +1582,8 @@ tbody tr:hover td{{background:var(--panel2);color:var(--text)}}
         <a class="{main_tab_class}" href="/">全部</a>
         <a class="{rwa_tab_class}" href="/rwa">RWA 股票</a>
       </nav>
-      <label class="slider">未平仓额 ≥ <span id="oi-label">$1M</span><input id="oi-slider" type="range" min="0" max="100" value="0"></label>
-      <label class="slider">日成交额 ≥ <span id="vol-label">$1M</span><input id="vol-slider" type="range" min="0" max="100" value="0"></label>
-      <label class="slider">间隔≤<span id="interval-label">*H</span><input id="interval-slider" type="range" min="0" max="100" value="100"></label>
+      <label class="slider">未平仓额 ≥ <span id="oi-label">$1M</span><input id="oi-slider" type="range" min="0" max="100" step="1" value="10"></label>
+      <label class="slider">日成交额 ≥ <span id="vol-label">$0</span><input id="vol-slider" type="range" min="0" max="100" step="1" value="0"></label>
     </div>
     <div class="actions">
       <input id="search-input" class="search" placeholder="搜索币种/交易所" oninput="applyFilters()">
@@ -1626,6 +1625,7 @@ const RWA_STOCK_ASSETS=new Set({rwa_stock_assets_json});
 const DEFAULT_VISIBLE_ROWS=20;
 const DISPLAY_MIN_OI_USD=25000;
 const DISPLAY_MIN_VOLUME_USD=50000;
+const THRESHOLD_UNIT_USD=100000;
 const BLACKLIST_STORAGE_KEY="perpArb.assetBlacklist.v1";
 let selectedVenues=new Set();
 let blacklistedAssets=new Set();
@@ -1634,6 +1634,7 @@ let activeSort="annual";
 let sortAnnualDir=-1;
 let sortSpreadDir=-1;
 let sortSpreadMeanDir=-1;
+let filterTimer=0;
 
 function esc(v){{return String(v??"").replace(/[&<>"]/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}})[c])}}
 function normVenue(v){{const s=String(v||"").replace(/-ws$/,"").toLowerCase();return s.charAt(0).toUpperCase()+s.slice(1)}}
@@ -1715,6 +1716,7 @@ async function removeBlacklistAsset(asset){{
   await syncBlacklist();
 }}
 function fmtMoney(v){{v=Number(v)||0;if(v<=0)return"--";const a=Math.abs(v);if(a>=1e9)return"$"+(v/1e9).toFixed(1)+"B";if(a>=1e6)return"$"+(v/1e6).toFixed(1)+"M";if(a>=1e3)return"$"+(v/1e3).toFixed(1)+"K";return"$"+v.toFixed(0)}}
+function fmtThresholdMoney(v){{v=Number(v)||0;if(v<=0)return"$0";return fmtMoney(v)}}
 function fmtSignedPct(v,d=1){{v=Number(v)||0;return (v>0?"+":"")+v.toFixed(d)+"%"}}
 function fmtSignedBps(v,d=4){{v=Number(v)||0;return (v>0?"+":"")+v.toFixed(d)+"%"}}
 function fmtFeeBps(v){{v=Number(v);if(!Number.isFinite(v))return"--";return v.toFixed(1)+"bps"}}
@@ -1800,21 +1802,13 @@ function rowMetrics(item){{
   const interval=primaryIsA?ia:ib;
   return {{spread,spreadVsMean,fundingAligned,fundingCarry,fundingDirectionTitle,feeSum,feeTitle,oi,vol,minOi,minVol,annual,next,interval,funding,primaryVenue,counterpartyVenue,primaryVenueTitle,counterpartyVenueTitle}};
 }}
-function threshold(slider,min,max,zeroValue=0){{
-  const x=(Number(slider.value)||0)/100;
-  if(x<=0)return zeroValue;
-  return min*Math.pow(max/min,x);
-}}
-function intervalThreshold(slider){{
-  const x=(Number(slider.value)||0)/100;
-  if(x>=0.99)return Infinity;
-  return 1+x*23;
+function threshold(slider){{
+  const value=Math.max(0,Number(slider.value)||0);
+  return value*THRESHOLD_UNIT_USD;
 }}
 function updateSliderLabels(){{
-  $("oi-label").textContent=fmtMoney(threshold($("oi-slider"),1e6,1e9,1e6));
-  $("vol-label").textContent=fmtMoney(threshold($("vol-slider"),1e6,1e9));
-  const h=intervalThreshold($("interval-slider"));
-  $("interval-label").textContent=Number.isFinite(h)?fmtHours(h):"*H";
+  $("oi-label").textContent=fmtThresholdMoney(threshold($("oi-slider")));
+  $("vol-label").textContent=fmtThresholdMoney(threshold($("vol-slider")));
 }}
 function renderVenueChecks(){{
   const box=$("venue-checks");
@@ -1825,12 +1819,23 @@ function renderVenueChecks(){{
   }}).join("");
 }}
 function toggleVenue(el){{if(el.checked)selectedVenues.add(el.value);else selectedVenues.delete(el.value);applyFilters()}}
+function cancelScheduledFilter(){{
+  if(filterTimer){{clearTimeout(filterTimer);filterTimer=0;}}
+}}
+function scheduleApplyFilters(delay=120){{
+  cancelScheduledFilter();
+  filterTimer=setTimeout(()=>{{filterTimer=0;applyFilters()}},delay);
+}}
 function initControls(){{
   loadBlacklist();
   for(const v of ACTIVE_HINTS)selectedVenues.add(v);
   renderVenueChecks();
   renderBlacklistTags();
-  for(const id of ["oi-slider","vol-slider","interval-slider"])$(id).addEventListener("input",()=>{{updateSliderLabels();applyFilters()}});
+  for(const id of ["oi-slider","vol-slider"]){{
+    const el=$(id);
+    el.addEventListener("input",()=>{{updateSliderLabels();scheduleApplyFilters(120)}});
+    el.addEventListener("change",()=>{{cancelScheduledFilter();updateSliderLabels();applyFilters()}});
+  }}
   updateSliderLabels();
 }}
 function matches(item,m){{
@@ -1844,9 +1849,8 @@ function matches(item,m){{
   }}
   const va=normVenue(item.venue_a), vb=normVenue(item.venue_b);
   if(selectedVenues.size&&!(selectedVenues.has(va)||selectedVenues.has(vb)))return false;
-  if(m.minOi<threshold($("oi-slider"),1e6,1e9,1e6))return false;
-  if(m.minVol<threshold($("vol-slider"),1e6,1e9))return false;
-  if(m.interval>intervalThreshold($("interval-slider")))return false;
+  if(m.minOi<threshold($("oi-slider")))return false;
+  if(m.minVol<threshold($("vol-slider")))return false;
   return true;
 }}
 function displayQuality(item){{
